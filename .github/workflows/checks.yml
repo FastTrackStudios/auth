@@ -1,0 +1,29 @@
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: [self-hosted, thebattleship]
+    steps:
+      - uses: actions/checkout@v4
+      - name: clippy
+        run: nix develop -c cargo clippy --workspace --all-targets --all-features
+      - name: tests
+        run: nix develop -c cargo test --workspace --all-features
+      - name: the auth pages' sheet is current
+        run: nix develop -c just auth-ui-css-check
+  package:
+    runs-on: [self-hosted, thebattleship]
+    steps:
+      - uses: actions/checkout@v4
+      - name: auth-server, as infra deploys it
+        run: nix build .#auth-server

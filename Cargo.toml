@@ -1,0 +1,217 @@
+# auth: FastTrackStudio's identity library and its server
+# (auth.fasttrackstudio.app). One workspace, one lockfile.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/auth-proto",
+    "crates/auth-macros",
+    "crates/auth",
+    "crates/auth-db",
+    "crates/auth-client",
+    "crates/architect-auth",
+    "crates/auth-ui",
+    "apps/auth-server",
+    "apps/mock-oauth",
+    "tests/native",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+authors = ["FastTrack Studio"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/FastTrackStudios/auth"
+
+[workspace.dependencies]
+auth-proto = { path = "crates/auth-proto" }
+auth-macros = { path = "crates/auth-macros" }
+auth = { path = "crates/auth" }
+auth-db = { path = "crates/auth-db" }
+auth-client = { path = "crates/auth-client" }
+architect-auth = { path = "crates/architect-auth" }
+auth-ui = { path = "crates/auth-ui" }
+auth-server = { path = "apps/auth-server" }
+
+argon2 = "0.5"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
+chacha20poly1305 = "0.10"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "wasmbind", "serde"] }
+clsx = "0.1.1"
+cookie = "0.18"
+dioxus = { git = "https://github.com/DioxusLabs/dioxus", rev = "430cfb563f1b70602ef387f0c80f171d84527b41", default-features = false, features = ["lib"] }
+dioxus-ssr = { git = "https://github.com/DioxusLabs/dioxus", rev = "430cfb563f1b70602ef387f0c80f171d84527b41" }
+eyre = "0.6"
+facet = { version = "0.50.0-rc.7", features = ["reflect", "chrono", "uuid"] }
+fake = { version = "4", features = ["derive", "uuid", "chrono"] }
+hex = "0.4"
+hkdf = "0.12"
+jsonwebtoken = "9"
+k256 = { version = "0.14", features = ["ecdsa"] }
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder", "hostname"] }
+percent-encoding = "2"
+proptest = "1"
+qrcodegen = "1"
+rand = "0.8"
+sea-orm = { version = "1", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros", "with-uuid", "with-chrono"] }
+sea-orm-migration = { version = "1", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha1 = "0.10"
+sha2 = "0.10"
+sha3 = "0.12"
+subtle = "2.6"
+thiserror = "2.0"
+tokio = { version = "1.48", features = ["full"] }
+totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
+tower-http = { version = "0.6", features = ["fs", "set-header"] }
+tracing = { version = "0.1", features = ["std"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tw_merge = "0.1.21"
+uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
+vox = { version = "0.10.0-rc.7", default-features = false, features = ["runtime"] }
+vox-core = { version = "0.10.0-rc.7" }
+vox-types = { version = "0.10.0-rc.7" }
+webauthn-rs = { version = "0.5", features = [
+    "danger-allow-state-serialisation",
+    "resident-key-support",
+    "conditional-ui",
+] }
+
+[workspace.lints.rust]
+dead_code = "warn"
+unused = "warn"
+unused_unsafe = "warn"
+# The derives emit `#[cfg(feature = "vox" | "server" | "fake")]` into
+# consumer crates; a crate that declares none of them (an app, an
+# example) should not warn about it.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("vox", "server", "fake"))'] }
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "allow"
+private_intra_doc_links = "allow"
+redundant_explicit_links = "allow"
+
+[workspace.lints.clippy]
+# ── The house style (namtao.com/rust) ─────────────────────────────────
+# `priority = -1` so the individual `allow`s further down win over the
+# group. Members opt in with `[lints] workspace = true` — a crate without
+# that line inherits NOTHING, which is how the pre-existing allow-list
+# below sat inert in `architect`, the three proc-macro crates, atom,
+# form, auth, crdt and telemetry until 2026-09-09.
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+
+# ── No panics in shipped code ─────────────────────────────────────────
+# architect is a library that runs inside other people's processes — a
+# REAPER extension, an audio pump thread, a long-lived server. A panic
+# here is not a stack trace, it is a dead host. Tests are exempt via
+# `clippy.toml`.
+# The one lint from the set that is turned off, deliberately.
+#
+# architect's fallible APIs return typed `thiserror` enums whose variants
+# carry their own docs (`RepoError`, `AuthFlowError`, `DispatchError`,
+# `LayerPlanError`, …). `# Errors` fired on 230 functions, and the honest
+# section for almost all of them is "returns the error type in the
+# signature, whose variants are documented" — 230 copies of which makes
+# the docs worse, not better, and buries the handful of methods that
+# genuinely have something to say.
+#
+# `missing_panics_doc` stays ON: a function that CAN panic must say so,
+# and after this cleanup there are few enough of those to keep honest.
+missing_errors_doc = "allow"
+
+# New in clippy 1.99 (pedantic). It wants `assert!(v.is_empty())` written
+# as `assert_eq!(v, [])`, which for a `Vec<T>` needs `[] as [T; 0]` and
+# then trips `as_conversions`. `assert!(v.is_empty())` reads fine.
+assert_is_empty = "allow"
+
+# The `async` on these is not the impl's to choose. Every site is either
+# a trait method whose signature the trait owns (`Link::close`,
+# `PermissionCheck::can`), or a repo-shaped inherent API whose callers
+# must be able to `.await` it regardless of whether *today's* body
+# happens to be synchronous — `LoroRepo::get`/`list` mirror the async
+# `Repo` surface the derive emits. Dropping `async` would be a breaking
+# change that also forbids the next implementation from awaiting.
+unused_async_trait_impl = "allow"
+
+# Fires on macro attribute structs (`ContainerAttrs`, `FieldAttrs`),
+# Dioxus component props, and config builders. The lint's suggested fix
+# is a state enum, which is right when the bools are mutually exclusive
+# states — and wrong here, where they are independent, individually
+# settable flags. Modelling `#[architect(primary_key, filterable,
+# sortable, fulltext)]` as an enum would be a worse API, not a better one.
+struct_excessive_bools = "allow"
+
+# Counts lines, which in this tree measures the size of a *template*
+# rather than the complexity of a function. Of the 21 sites it flagged,
+# 18 are declarative emitters — proc-macro `quote!` builders
+# (`architect-derive::build_*_block`, `architect-rpc-derive::emit_*`),
+# SeaORM `create_tables`/`create_indexes` DDL, a theme-preset table, a
+# story registry. Splitting those at the 100-line mark would cut a single
+# template in half for no gain in readability.
+#
+# The three that are real control flow were reviewed individually;
+# `architect_launcher_core::query::query_filtered` is the one worth an
+# actual refactor, and it is a launcher concern, not a framework one.
+too_many_lines = "allow"
+
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+unreachable = "deny"
+unimplemented = "deny"
+unchecked_time_subtraction = "deny"
+todo = "deny"
+string_slice = "deny"
+panic_in_result_fn = "deny"
+panic = "deny"
+exit = "deny"
+as_conversions = "deny"
+
+# ── Pre-existing per-lint relaxations (priority 0 — these win) ────────
+field_reassign_with_default = "allow"
+redundant_closure = "allow"
+nonminimal_bool = "allow"
+clone_on_copy = "allow"
+useless_vec = "allow"
+type_complexity = "allow"
+manual_clamp = "allow"
+needless_range_loop = "allow"
+not_unsafe_ptr_arg_deref = "allow"
+only_used_in_recursion = "allow"
+unnecessary_sort_by = "allow"
+unusual_byte_groupings = "allow"
+manual_c_str_literals = "allow"
+branches_sharing_code = "allow"
+needless_borrow = "allow"
+needless_borrows_for_generic_args = "allow"
+collapsible_if = "allow"
+map_clone = "allow"
+unnecessary_map_or = "allow"
+if_same_then_else = "allow"
+redundant_locals = "allow"
+large_enum_variant = "allow"
+explicit_counter_loop = "allow"
+manual_strip = "allow"
+too_many_arguments = "allow"
+double_must_use = "allow"
+vec_init_then_push = "allow"
+collapsible_match = "allow"
+filter_next = "allow"
+
+# ── Profiles ──────────────────────────────────────────────────────────
+
+# The FastTrackStudios/vendor forks the fleet runs on (each one's reason
+# is in vendor's README): without them a vox reply with a Uuid or a
+# timestamp panics (phon), timestamps lose their sub-seconds
+# (facet-core), and a schema exchange fails outright (vox-phon).
+[patch.crates-io]
+phon = { git = "https://github.com/FastTrackStudios/vendor", tag = "v0.4.0" }
+phon-jit = { git = "https://github.com/FastTrackStudios/vendor", tag = "v0.2.3" }
+facet-core = { git = "https://github.com/FastTrackStudios/vendor", tag = "v0.4.0" }
+vox-phon = { git = "https://github.com/FastTrackStudios/vendor", tag = "v0.3.0" }
