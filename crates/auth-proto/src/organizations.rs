@@ -137,7 +137,9 @@ pub trait OrganizationService {
         organization_id: Uuid,
     ) -> Result<Vec<OrganizationMember>, AuthFlowError>;
 
-    /// Create an org; the caller becomes its owner.
+    /// Create an org; the caller becomes its owner. The token may be a
+    /// session or a first-party app's access token: creating changes no
+    /// org that exists (every other write here takes a session).
     #[http(path = "organization/create")]
     async fn create_organization(
         &self,

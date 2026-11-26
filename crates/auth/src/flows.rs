@@ -4882,6 +4882,133 @@ pub mod email_password {
             assert!(orgs(&web.access_token).await.is_err());
         }
 
+        /// A first-party app's access token creates an organization, and
+        /// its person is the owner (an app signed in by redirect holds no
+        /// session: Studio, through Drive's `drive` client). Creating
+        /// touches no organization that exists, so it is the one write the
+        /// token takes; a third party's token is refused, and so is the
+        /// token once its sign-in is over.
+        // r[verify auth.jwt.first-party-access]
+        #[tokio::test]
+        async fn a_first_party_access_token_creates_an_organization_its_person_owns() {
+            let client = |id: &str, first_party: bool| OidcClientConfig {
+                client_id: id.into(),
+                client_secret: None,
+                name: id.into(),
+                redirect_uris: vec![format!("https://{id}.example.com/callback")],
+                scopes: vec!["openid".into(), "email".into()],
+                public_client: true,
+                skip_consent: true,
+                first_party,
+                rotate_refresh_tokens: false,
+                disabled: false,
+                issue_sessions: false,
+            };
+            let auth = ArchitectAuth::builder()
+                .secret("a-secret-at-least-32-bytes-long!!")
+                .base_url("https://auth.example.com")
+                .oidc_client(client("drive", true))
+                .oidc_client(client("elsewhere", false))
+                .storage(MemoryStorage::default())
+                .build()
+                .expect("build auth");
+            let bundle = auth
+                .create_email_password_user(CreateEmailPasswordUser {
+                    email: "ada@example.com".into(),
+                    password: "correct horse battery staple".into(),
+                    name: None,
+                    username: None,
+                    image: None,
+                    metadata_json: None,
+                    ip_address: None,
+                    user_agent: None,
+                })
+                .await
+                .expect("create user");
+            let verifier = "correct-horse-battery-staple-verifier";
+            let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(sha2::Sha256::digest(verifier.as_bytes()));
+            let access_token = |client_id: &'static str| {
+                let (auth, session, challenge) = (&auth, bundle.token.clone(), challenge.clone());
+                async move {
+                    let redirect = format!("https://{client_id}.example.com/callback");
+                    let authorization = auth
+                        .authorize_oidc(AuthorizeOidc {
+                            session_token: session,
+                            client_id: client_id.into(),
+                            redirect_uri: redirect.clone(),
+                            response_type: "code".into(),
+                            scope: Some("openid email".into()),
+                            state: None,
+                            nonce: None,
+                            code_challenge: Some(challenge),
+                            code_challenge_method: Some("S256".into()),
+                            prompt: None,
+                        })
+                        .await
+                        .expect("authorize");
+                    auth.exchange_oidc_token(ExchangeOidcToken {
+                        grant_type: "authorization_code".into(),
+                        code: Some(authorization.code),
+                        redirect_uri: Some(redirect),
+                        client_id: client_id.into(),
+                        client_secret: None,
+                        code_verifier: Some(verifier.into()),
+                        refresh_token: None,
+                    })
+                    .await
+                    .expect("exchange")
+                    .access_token
+                }
+            };
+            let create = |token: String, slug: &str| {
+                auth.create_organization(crate::CreateOrganization {
+                    session_token: token,
+                    name: "Days to Praise".into(),
+                    slug: slug.into(),
+                    logo: None,
+                    metadata_json: None,
+                })
+            };
+
+            let drive = access_token("drive").await;
+            let made = create(drive.clone(), "days-to-praise")
+                .await
+                .expect("the first-party token creates an organization");
+            assert_eq!(made.organization.slug, "days-to-praise");
+            assert_eq!(made.membership.user_id, bundle.user.id);
+            assert_eq!(made.membership.role, "owner");
+            let listed = auth
+                .list_organizations(ListOrganizations {
+                    session_token: drive.clone(),
+                })
+                .await
+                .expect("list");
+            assert_eq!(
+                listed
+                    .iter()
+                    .map(|b| (b.organization.slug.as_str(), b.membership.role.as_str()))
+                    .collect::<Vec<_>>(),
+                [("days-to-praise", "owner")]
+            );
+
+            let third_party = access_token("elsewhere").await;
+            assert!(
+                create(third_party, "elsewhere-band").await.is_err(),
+                "a third party's token created an organization"
+            );
+
+            auth.sign_out(SignOut {
+                token: bundle.token.clone(),
+            })
+            .await
+            .expect("sign out");
+            assert!(
+                create(drive, "after-sign-out").await.is_err(),
+                "a signed-out sign-in's token created an organization"
+            );
+        }
+
         /// No client may be named like the JWT audience: its id tokens
         /// would verify as access tokens (#628 L1).
         #[test]
@@ -15674,11 +15801,12 @@ pub mod organizations {
             input: CreateOrganization,
         ) -> Result<OrganizationBundle, AuthFlowError> {
             validate_json(input.metadata_json.as_deref(), "metadata_json")?;
-            let session = self
-                .current_session(CurrentSession {
-                    token: input.session_token,
-                })
-                .await?;
+            // A session, or a first-party app's access token (see
+            // `organization_caller`): creating changes no organization
+            // that exists, it only makes one the caller owns, so an app
+            // signed in by redirect may do it. Every write to an existing
+            // organization still asks for a session.
+            let caller = self.organization_caller(&input.session_token).await?;
             let slug = normalize_slug(&input.slug)?;
             if self
                 .storage
@@ -15700,7 +15828,7 @@ pub mod organizations {
                         logo: input.logo,
                         metadata_json: input.metadata_json,
                     },
-                    session.user.id,
+                    caller.id,
                 )
                 .await?;
 
@@ -15806,9 +15934,9 @@ pub mod organizations {
             &self,
             input: ListOrganizations,
         ) -> Result<Vec<OrganizationBundle>, AuthFlowError> {
-            // The one organization method an OIDC client's access token
-            // may call — see `organization_caller`. Everything that
-            // *changes* an organization still asks for a session.
+            // An organization read an OIDC client's access token may
+            // call — see `organization_caller`. Everything that *changes*
+            // an existing organization still asks for a session.
             let caller = self.organization_caller(&input.session_token).await?;
             let mut bundles: Vec<OrganizationBundle> = self
                 .storage
@@ -16798,9 +16926,10 @@ pub mod organizations {
             Ok(out)
         }
 
-        /// The account behind a credential presented to `whoami` or
-        /// `list_organizations`, the only two calls that take one of this
-        /// issuer's own access tokens as well as a session token.
+        /// The account behind a credential presented to `whoami`,
+        /// `list_organizations` or `create_organization`, the only calls
+        /// that take one of this issuer's own access tokens as well as a
+        /// session token.
         ///
         /// Two kinds of caller reach it. The issuer's own pages, the
         /// desktop clients and an org's node relaying a person's bearer
