@@ -28,6 +28,8 @@ vox OrganizationService.claim_invitation MethodId(5821848147274938028)
 vox OrganizationService.link_agent MethodId(16013612976659277234)
 vox OrganizationService.unlink_agent MethodId(2346787530911032625)
 vox OrganizationService.list_agents MethodId(15374737937559766339)
+vox OrganizationService.create_invite_link MethodId(13896484852163564134)
+vox OrganizationService.join_by_link MethodId(7918352320188777463)
 vox DeviceService.register_device MethodId(9006196999075710943)
 vox DeviceService.list_devices MethodId(9475007773574552997)
 vox DeviceService.forget_device MethodId(4239644468833434180)
@@ -61,6 +63,8 @@ http OrganizationService.claim_invitation POST /auth/organization/claim-invitati
 http OrganizationService.link_agent POST /auth/organization/agents/link
 http OrganizationService.unlink_agent POST /auth/organization/agents/unlink
 http OrganizationService.list_agents POST /auth/organization/agents
+http OrganizationService.create_invite_link POST /auth/organization/invite-link
+http OrganizationService.join_by_link POST /auth/organization/join
 http DeviceService.register_device POST /auth/devices/register
 http DeviceService.list_devices POST /auth/devices/list
 http DeviceService.forget_device POST /auth/devices/forget

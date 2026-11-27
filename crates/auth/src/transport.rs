@@ -1297,6 +1297,41 @@ pub mod vox {
                 .await
         }
 
+        async fn create_invite_link(
+            &self,
+            token: String,
+            link: auth_proto::NewInviteLink,
+        ) -> Result<auth_proto::IssuedInviteLink, AuthFlowError> {
+            let minted = self
+                .auth
+                .create_invite_link(crate::CreateInviteLink {
+                    session_token: token,
+                    organization_id: link.organization_id,
+                    role: link.role,
+                    label: link.label,
+                    expires_at: link.expires_at,
+                    max_uses: link.max_uses,
+                })
+                .await?;
+            Ok(auth_proto::IssuedInviteLink {
+                link: minted.link,
+                token: minted.token,
+            })
+        }
+
+        async fn join_by_link(
+            &self,
+            token: String,
+            link_token: String,
+        ) -> Result<auth_proto::AuthMember, AuthFlowError> {
+            self.auth
+                .redeem_invite_link(crate::RedeemInviteLink {
+                    session_token: token,
+                    token: link_token,
+                })
+                .await
+        }
+
         async fn unlink_agent(&self, token: String, link_id: Uuid) -> Result<(), AuthFlowError> {
             self.auth
                 .unlink_agent(crate::UnlinkAgent {

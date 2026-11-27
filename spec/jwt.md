@@ -35,9 +35,18 @@ fallback keys by key id.
 
 r[auth.jwt.first-party-access]
 The issuer MUST accept its own OIDC access token in place of a session token
-at `whoami`, `list_organizations` and `create_organization` only (creating
-an organization changes none that exists; every other organization write
-MUST take a session token), and only when it verifies with
+at these calls only: `whoami`, `list_organizations`, `create_organization`,
+`list_members`, `invite_member` (`create_invitation`), `create_invite_link`,
+`remove_member`, `accept_invitation`, `claim_invitation` and `join_by_link`
+(`redeem_invite_link`). Each keeps its own check on the account behind the
+token, exactly as for a session: inviting and minting a link need
+`invitation:create`, removing needs `member:delete`, the member list needs
+membership, accepting needs the invitation's token, claiming needs the
+invitation's address and joining needs a usable link. Every other
+organization call (renaming, changing a role, leaving, deleting, teams,
+roles, cancelling or listing invitations and links, setting the active
+organization, linking agents) MUST take a session token. It accepts the
+token only when it verifies with
 the default audience, names an enabled client registered `first_party`
 (`skip_consent` alone MUST NOT be enough: it is a consent convenience),
 carries the `openid` scope, is an access token (`token_use: "access"`, which
