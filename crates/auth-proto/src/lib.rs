@@ -163,7 +163,8 @@ pub use device::{
 // The organization surface — same shape, second trait.
 pub use organizations::prelude::*;
 pub use organizations::{
-    Invite, IssuedInvitation, LinkedAgent, NewOrganization, OrganizationBundle, OrganizationMember,
+    Invite, IssuedInvitation, IssuedInviteLink, LinkedAgent, NewInviteLink, NewOrganization,
+    OrganizationBundle, OrganizationMember,
 };
 
 /// Which page of a list: its index (from 0) and how many rows it holds.

@@ -5009,6 +5009,472 @@ pub mod email_password {
             );
         }
 
+        /// The people of one organization, each signed in to a first-party
+        /// app (`drive`) and to a third party (`elsewhere`), for the
+        /// member calls that take a first-party access token
+        /// (`r[auth.jwt.first-party-access]`, studio#698 and #699).
+        struct Band {
+            auth: ArchitectAuth<MemoryStorage>,
+            org: Uuid,
+            owner: Person,
+            admin: Person,
+            member: Person,
+            outsider: Person,
+        }
+
+        struct Person {
+            id: Uuid,
+            email: String,
+            session: String,
+            /// The first-party app's access token: no session.
+            app: String,
+            /// A third party's access token.
+            elsewhere: String,
+        }
+
+        impl Band {
+            async fn new() -> Self {
+                let client = |id: &str, first_party: bool| OidcClientConfig {
+                    client_id: id.into(),
+                    client_secret: None,
+                    name: id.into(),
+                    redirect_uris: vec![format!("https://{id}.example.com/callback")],
+                    scopes: vec!["openid".into(), "email".into()],
+                    public_client: true,
+                    skip_consent: true,
+                    first_party,
+                    rotate_refresh_tokens: false,
+                    disabled: false,
+                    issue_sessions: false,
+                };
+                let auth = ArchitectAuth::builder()
+                    .secret("a-secret-at-least-32-bytes-long!!")
+                    .base_url("https://auth.example.com")
+                    .oidc_client(client("drive", true))
+                    .oidc_client(client("elsewhere", false))
+                    .storage(MemoryStorage::default())
+                    .build()
+                    .expect("build auth");
+                let owner = Self::person(&auth, "owner@example.com").await;
+                let admin = Self::person(&auth, "admin@example.com").await;
+                let member = Self::person(&auth, "member@example.com").await;
+                let outsider = Self::person(&auth, "outsider@example.com").await;
+                let org = auth
+                    .create_organization(crate::CreateOrganization {
+                        session_token: owner.session.clone(),
+                        name: "Days to Praise".into(),
+                        slug: "days-to-praise".into(),
+                        logo: None,
+                        metadata_json: None,
+                    })
+                    .await
+                    .expect("create organization")
+                    .organization
+                    .id;
+                for (who, role) in [(&admin, "admin"), (&member, "member")] {
+                    let link = auth
+                        .create_invite_link(CreateInviteLink {
+                            session_token: owner.session.clone(),
+                            organization_id: org,
+                            role: role.into(),
+                            label: None,
+                            expires_at: None,
+                            max_uses: Some(1),
+                        })
+                        .await
+                        .expect("mint a link");
+                    auth.redeem_invite_link(crate::RedeemInviteLink {
+                        session_token: who.session.clone(),
+                        token: link.token,
+                    })
+                    .await
+                    .expect("join");
+                }
+                Self {
+                    auth,
+                    org,
+                    owner,
+                    admin,
+                    member,
+                    outsider,
+                }
+            }
+
+            async fn person(auth: &ArchitectAuth<MemoryStorage>, email: &str) -> Person {
+                let bundle = auth
+                    .create_email_password_user(CreateEmailPasswordUser {
+                        email: email.into(),
+                        password: "correct horse battery staple".into(),
+                        name: None,
+                        username: None,
+                        image: None,
+                        metadata_json: None,
+                        ip_address: None,
+                        user_agent: None,
+                    })
+                    .await
+                    .expect("create user");
+                let verifier = "correct-horse-battery-staple-verifier";
+                let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(sha2::Sha256::digest(verifier.as_bytes()));
+                let mut tokens = Vec::new();
+                for client_id in ["drive", "elsewhere"] {
+                    let redirect = format!("https://{client_id}.example.com/callback");
+                    let authorization = auth
+                        .authorize_oidc(AuthorizeOidc {
+                            session_token: bundle.token.clone(),
+                            client_id: client_id.into(),
+                            redirect_uri: redirect.clone(),
+                            response_type: "code".into(),
+                            scope: Some("openid email".into()),
+                            state: None,
+                            nonce: None,
+                            code_challenge: Some(challenge.clone()),
+                            code_challenge_method: Some("S256".into()),
+                            prompt: None,
+                        })
+                        .await
+                        .expect("authorize");
+                    let token = auth
+                        .exchange_oidc_token(ExchangeOidcToken {
+                            grant_type: "authorization_code".into(),
+                            code: Some(authorization.code),
+                            redirect_uri: Some(redirect),
+                            client_id: client_id.into(),
+                            client_secret: None,
+                            code_verifier: Some(verifier.into()),
+                            refresh_token: None,
+                        })
+                        .await
+                        .expect("exchange")
+                        .access_token;
+                    tokens.push(token);
+                }
+                let elsewhere = tokens.pop().expect("elsewhere's token");
+                let app = tokens.pop().expect("drive's token");
+                Person {
+                    id: bundle.user.id,
+                    email: email.into(),
+                    session: bundle.token,
+                    app,
+                    elsewhere,
+                }
+            }
+
+            async fn members(&self, token: &str) -> Result<Vec<Uuid>, AuthFlowError> {
+                let mut ids: Vec<Uuid> = self
+                    .auth
+                    .list_members(ListMembers {
+                        session_token: token.into(),
+                        organization_id: self.org,
+                    })
+                    .await?
+                    .into_iter()
+                    .map(|m| m.user.id)
+                    .collect();
+                ids.sort();
+                Ok(ids)
+            }
+
+            async fn invite(
+                &self,
+                token: &str,
+                email: &str,
+            ) -> Result<crate::InvitationToken, AuthFlowError> {
+                self.auth
+                    .create_invitation(CreateInvitation {
+                        session_token: token.into(),
+                        organization_id: self.org,
+                        email: email.into(),
+                        role: "member".into(),
+                        expires_at: Utc::now() + Duration::days(7),
+                    })
+                    .await
+            }
+
+            async fn link(&self, token: &str) -> Result<crate::InviteLinkToken, AuthFlowError> {
+                self.auth
+                    .create_invite_link(CreateInviteLink {
+                        session_token: token.into(),
+                        organization_id: self.org,
+                        role: "member".into(),
+                        label: None,
+                        expires_at: None,
+                        max_uses: None,
+                    })
+                    .await
+            }
+
+            async fn remove(&self, token: &str, user_id: Uuid) -> Result<(), AuthFlowError> {
+                self.auth
+                    .remove_member(RemoveMember {
+                        session_token: token.into(),
+                        organization_id: self.org,
+                        user_id,
+                    })
+                    .await
+            }
+        }
+
+        /// Any member's app token reads the roster; an outsider's and a
+        /// third party's do not.
+        // r[verify auth.jwt.first-party-access]
+        #[tokio::test]
+        async fn a_first_party_access_token_lists_the_members_to_a_member_only() {
+            let band = Band::new().await;
+            let mut everyone = vec![band.owner.id, band.admin.id, band.member.id];
+            everyone.sort();
+            for who in [&band.owner, &band.admin, &band.member] {
+                assert_eq!(band.members(&who.app).await.expect("members"), everyone);
+            }
+            assert!(matches!(
+                band.members(&band.outsider.app).await,
+                Err(AuthFlowError::PermissionDenied)
+            ));
+            assert!(band.members(&band.member.elsewhere).await.is_err());
+        }
+
+        /// An owner's or admin's app token invites, by address and by
+        /// link; a member's is refused both, and a third party's is too.
+        // r[verify auth.jwt.first-party-access]
+        #[tokio::test]
+        async fn a_first_party_access_token_invites_for_an_owner_or_admin_only() {
+            let band = Band::new().await;
+            for who in [&band.owner, &band.admin] {
+                let invited = band
+                    .invite(&who.app, "new@example.com")
+                    .await
+                    .expect("invite by address");
+                assert_eq!(invited.invitation.inviter_id, who.id);
+                let link = band.link(&who.app).await.expect("invite by link");
+                assert_eq!(link.link.created_by, who.id);
+            }
+            assert!(matches!(
+                band.invite(&band.member.app, "new@example.com").await,
+                Err(AuthFlowError::PermissionDenied)
+            ));
+            assert!(matches!(
+                band.link(&band.member.app).await,
+                Err(AuthFlowError::PermissionDenied)
+            ));
+            assert!(matches!(
+                band.link(&band.outsider.app).await,
+                Err(AuthFlowError::PermissionDenied)
+            ));
+            assert!(
+                band.invite(&band.owner.elsewhere, "x@example.com")
+                    .await
+                    .is_err()
+            );
+            assert!(band.link(&band.owner.elsewhere).await.is_err());
+        }
+
+        /// An owner's app token removes a member, who then cannot read
+        /// the roster; a member's is refused, and a third party's too.
+        // r[verify auth.jwt.first-party-access]
+        #[tokio::test]
+        async fn a_first_party_access_token_removes_a_member_for_an_owner_only() {
+            let band = Band::new().await;
+            assert!(matches!(
+                band.remove(&band.member.app, band.admin.id).await,
+                Err(AuthFlowError::PermissionDenied)
+            ));
+            assert!(
+                band.remove(&band.owner.elsewhere, band.member.id)
+                    .await
+                    .is_err()
+            );
+            band.remove(&band.owner.app, band.member.id)
+                .await
+                .expect("the owner removes a member");
+            assert!(matches!(
+                band.members(&band.member.app).await,
+                Err(AuthFlowError::PermissionDenied)
+            ));
+            let mut left = vec![band.owner.id, band.admin.id];
+            left.sort();
+            assert_eq!(band.members(&band.owner.app).await.expect("members"), left);
+        }
+
+        /// The invited person's app token accepts with the invitation's
+        /// token (and not with a wrong one), claims one addressed to them
+        /// (and not one addressed to somebody else), and joins by link
+        /// (and not by a made-up one).
+        // r[verify auth.jwt.first-party-access]
+        #[tokio::test]
+        async fn a_first_party_access_token_accepts_claims_and_joins() {
+            let band = Band::new().await;
+            let outsider = &band.outsider;
+
+            // Accept: the invitation's token is the entitlement.
+            let invited = band
+                .invite(&band.owner.session, "someone@example.com")
+                .await
+                .expect("invite");
+            assert!(
+                band.auth
+                    .accept_invitation(AcceptInvitation {
+                        session_token: outsider.app.clone(),
+                        invitation_id: invited.invitation.id,
+                        token: "not-the-token".into(),
+                    })
+                    .await
+                    .is_err()
+            );
+            assert!(
+                band.auth
+                    .accept_invitation(AcceptInvitation {
+                        session_token: outsider.elsewhere.clone(),
+                        invitation_id: invited.invitation.id,
+                        token: invited.token.clone(),
+                    })
+                    .await
+                    .is_err(),
+                "a third party's token accepted an invitation"
+            );
+            band.auth
+                .accept_invitation(AcceptInvitation {
+                    session_token: outsider.app.clone(),
+                    invitation_id: invited.invitation.id,
+                    token: invited.token,
+                })
+                .await
+                .expect("accept with any account");
+            assert!(band.members(&outsider.app).await.is_ok());
+            band.remove(&band.owner.app, outsider.id)
+                .await
+                .expect("remove");
+
+            // Claim: the caller's address is the entitlement.
+            let named = band
+                .invite(&band.owner.app, &outsider.email)
+                .await
+                .expect("invite by address");
+            let claim = |token: &str| {
+                band.auth.claim_invitation(crate::ClaimInvitation {
+                    session_token: token.into(),
+                    invitation_id: named.invitation.id,
+                })
+            };
+            assert!(
+                claim(&band.member.app).await.is_err(),
+                "somebody else claimed an invitation not addressed to them"
+            );
+            assert!(claim(&outsider.elsewhere).await.is_err());
+            claim(&outsider.app).await.expect("claim");
+            assert!(band.members(&outsider.app).await.is_ok());
+            band.remove(&band.owner.app, outsider.id)
+                .await
+                .expect("remove");
+
+            // Join by link: the link's token is the entitlement.
+            let link = band.link(&band.admin.app).await.expect("link");
+            let join = |token: &str, link: &str| {
+                band.auth.redeem_invite_link(crate::RedeemInviteLink {
+                    session_token: token.into(),
+                    token: link.into(),
+                })
+            };
+            assert!(join(&outsider.app, "made-up").await.is_err());
+            assert!(join(&outsider.elsewhere, &link.token).await.is_err());
+            let joined = join(&outsider.app, &link.token).await.expect("join");
+            assert_eq!(
+                (joined.user_id, joined.role.as_str()),
+                (outsider.id, "member")
+            );
+        }
+
+        /// The rest of an organization's calls still take a session: an
+        /// owner's app token renames, re-roles, leaves, deletes, cancels
+        /// and lists links nowhere.
+        // r[verify auth.jwt.first-party-access]
+        #[tokio::test]
+        async fn a_first_party_access_token_makes_no_other_organization_change() {
+            let band = Band::new().await;
+            let app = band.owner.app.clone();
+            let org = band.org;
+            assert!(
+                band.auth
+                    .update_organization(crate::UpdateOrganization {
+                        session_token: app.clone(),
+                        organization_id: org,
+                        name: Some("Renamed".into()),
+                        slug: None,
+                        logo: None,
+                        metadata_json: None,
+                    })
+                    .await
+                    .is_err(),
+                "renamed"
+            );
+            assert!(
+                band.auth
+                    .set_member_role(crate::SetMemberRole {
+                        session_token: app.clone(),
+                        organization_id: org,
+                        user_id: band.member.id,
+                        role: "admin".into(),
+                    })
+                    .await
+                    .is_err(),
+                "changed a role"
+            );
+            let invited = band
+                .invite(&band.owner.session, "pending@example.com")
+                .await
+                .expect("invite");
+            assert!(
+                band.auth
+                    .cancel_invitation(CancelInvitation {
+                        session_token: app.clone(),
+                        invitation_id: invited.invitation.id,
+                    })
+                    .await
+                    .is_err(),
+                "cancelled an invitation"
+            );
+            assert!(
+                band.auth
+                    .list_invite_links(ListInviteLinks {
+                        session_token: app.clone(),
+                        organization_id: org,
+                    })
+                    .await
+                    .is_err(),
+                "listed links"
+            );
+            assert!(
+                band.auth
+                    .leave_organization(LeaveOrganization {
+                        session_token: band.admin.app.clone(),
+                        organization_id: org,
+                    })
+                    .await
+                    .is_err(),
+                "left"
+            );
+            assert!(
+                band.auth
+                    .delete_organization(DeleteOrganization {
+                        session_token: app,
+                        organization_id: org,
+                    })
+                    .await
+                    .is_err(),
+                "deleted"
+            );
+            // The session still can: the refusals were the token's.
+            band.auth
+                .set_member_role(crate::SetMemberRole {
+                    session_token: band.owner.session.clone(),
+                    organization_id: org,
+                    user_id: band.member.id,
+                    role: "admin".into(),
+                })
+                .await
+                .expect("a session changes a role");
+        }
+
         /// No client may be named like the JWT audience: its id tokens
         /// would verify as access tokens (#628 L1).
         #[test]
@@ -16076,8 +16542,10 @@ pub mod organizations {
             &self,
             input: ListMembers,
         ) -> Result<Vec<OrganizationMember>, AuthFlowError> {
-            self.require_member(&input.session_token, input.organization_id)
-                .await?;
+            // A session, or a first-party app's access token
+            // (`organization_caller`): the roster is a read.
+            let caller = self.organization_caller(&input.session_token).await?;
+            self.member_of(caller.id, input.organization_id).await?;
             let members = self
                 .storage
                 .list_members_by_organization(input.organization_id)
@@ -16095,13 +16563,12 @@ pub mod organizations {
 
         // r[impl auth.org.remove-last-owner]
         pub async fn remove_member(&self, input: RemoveMember) -> Result<(), AuthFlowError> {
-            self.authorize_member_action(
-                &input.session_token,
-                input.organization_id,
-                "member",
-                "delete",
-            )
-            .await?;
+            // A session, or a first-party app's access token: an owner
+            // removes people from inside an app signed in by redirect
+            // (studio#698). Still `member:delete`, whichever it is.
+            let caller = self.organization_caller(&input.session_token).await?;
+            self.authorize_user_action(caller.id, input.organization_id, "member", "delete")
+                .await?;
             let member = self
                 .storage
                 .find_member(input.organization_id, input.user_id)
@@ -16298,17 +16765,10 @@ pub mod organizations {
             &self,
             input: CreateInvitation,
         ) -> Result<InvitationToken, AuthFlowError> {
-            self.authorize_member_action(
-                &input.session_token,
-                input.organization_id,
-                "invitation",
-                "create",
-            )
-            .await?;
-            let session = self
-                .current_session(CurrentSession {
-                    token: input.session_token,
-                })
+            // A session, or a first-party app's access token (studio#698);
+            // still `invitation:create`.
+            let caller = self.organization_caller(&input.session_token).await?;
+            self.authorize_user_action(caller.id, input.organization_id, "invitation", "create")
                 .await?;
             let canonical_email = normalize_email(&input.email)?;
             let token = generate_token().map_err(|err| AuthFlowError::Internal(err.to_string()))?;
@@ -16319,7 +16779,7 @@ pub mod organizations {
                     email: canonical_email,
                     role: input.role,
                     status: auth_proto::InvitationStatus::Pending.as_str().into(),
-                    inviter_id: session.user.id,
+                    inviter_id: caller.id,
                     expires_at: input.expires_at,
                 })
                 .await?;
@@ -16340,11 +16800,9 @@ pub mod organizations {
             &self,
             input: AcceptInvitation,
         ) -> Result<(), AuthFlowError> {
-            let session = self
-                .current_session(CurrentSession {
-                    token: input.session_token,
-                })
-                .await?;
+            // A session, or a first-party app's access token: the
+            // invitation's own token is the entitlement either way.
+            let caller = self.organization_caller(&input.session_token).await?;
             let invitation = self
                 .storage
                 .find_invitation_by_id(input.invitation_id)
@@ -16370,7 +16828,7 @@ pub mod organizations {
             }
             if self
                 .storage
-                .find_member(invitation.organization_id, session.user.id)
+                .find_member(invitation.organization_id, caller.id)
                 .await?
                 .is_some()
             {
@@ -16382,7 +16840,7 @@ pub mod organizations {
                 .accept_invitation_membership(
                     AuthMemberCreate {
                         organization_id: invitation.organization_id,
-                        user_id: session.user.id,
+                        user_id: caller.id,
                         role: invitation.role,
                     },
                     invitation.id,
@@ -16412,11 +16870,9 @@ pub mod organizations {
         /// The invitation is marked accepted, so the token it belongs to
         /// cannot be redeemed through the other path either.
         pub async fn claim_invitation(&self, input: ClaimInvitation) -> Result<(), AuthFlowError> {
-            let session = self
-                .current_session(CurrentSession {
-                    token: input.session_token,
-                })
-                .await?;
+            // A session, or a first-party app's access token: the
+            // caller's own address is the entitlement either way.
+            let caller = self.organization_caller(&input.session_token).await?;
             let invitation = self
                 .storage
                 .find_invitation_by_id(input.invitation_id)
@@ -16434,8 +16890,7 @@ pub mod organizations {
             // because an operator typing an invitation and an identity
             // provider reporting an address are two different people's
             // idea of capitalisation.
-            let addressed_to_me = session
-                .user
+            let addressed_to_me = caller
                 .email
                 .as_deref()
                 .is_some_and(|mine| mine.eq_ignore_ascii_case(&invitation.email));
@@ -16444,7 +16899,7 @@ pub mod organizations {
             }
             if self
                 .storage
-                .find_member(invitation.organization_id, session.user.id)
+                .find_member(invitation.organization_id, caller.id)
                 .await?
                 .is_some()
             {
@@ -16455,7 +16910,7 @@ pub mod organizations {
             self.storage
                 .create_member(AuthMemberCreate {
                     organization_id: invitation.organization_id,
-                    user_id: session.user.id,
+                    user_id: caller.id,
                     role: invitation.role,
                 })
                 .await?;
@@ -16482,17 +16937,9 @@ pub mod organizations {
             // A link grants a role, so minting one is `invitation:create`
             // — the same permission as inviting a named person, because
             // it is the same act with the address left blank.
-            self.authorize_member_action(
-                &input.session_token,
-                input.organization_id,
-                "invitation",
-                "create",
-            )
-            .await?;
-            let session = self
-                .current_session(CurrentSession {
-                    token: input.session_token,
-                })
+            // A session, or a first-party app's access token (studio#698).
+            let caller = self.organization_caller(&input.session_token).await?;
+            self.authorize_user_action(caller.id, input.organization_id, "invitation", "create")
                 .await?;
             if input.max_uses.is_some_and(|max| max < 1) {
                 return Err(AuthFlowError::InvalidInput(
@@ -16512,7 +16959,7 @@ pub mod organizations {
                     token_hash: hash_token(&self.config.secret, &token),
                     label: input.label,
                     role: input.role,
-                    created_by: session.user.id,
+                    created_by: caller.id,
                     expires_at: input.expires_at,
                     max_uses: input.max_uses,
                     revoked_at: None,
@@ -16589,15 +17036,13 @@ pub mod organizations {
             &self,
             input: RedeemInviteLink,
         ) -> Result<AuthMember, AuthFlowError> {
-            let session = self
-                .current_session(CurrentSession {
-                    token: input.session_token,
-                })
-                .await?;
+            // A session, or a first-party app's access token: the link's
+            // token is the entitlement either way.
+            let caller = self.organization_caller(&input.session_token).await?;
             let link = self.usable_invite_link(&input.token).await?;
             if let Some(existing) = self
                 .storage
-                .find_member(link.organization_id, session.user.id)
+                .find_member(link.organization_id, caller.id)
                 .await?
             {
                 // Already in: following the link a second time is a
@@ -16609,7 +17054,7 @@ pub mod organizations {
                     link.id,
                     AuthMemberCreate {
                         organization_id: link.organization_id,
-                        user_id: session.user.id,
+                        user_id: caller.id,
                         role: link.role,
                     },
                 )
@@ -16926,10 +17371,16 @@ pub mod organizations {
             Ok(out)
         }
 
-        /// The account behind a credential presented to `whoami`,
-        /// `list_organizations` or `create_organization`, the only calls
+        /// The account behind a credential presented to one of the calls
         /// that take one of this issuer's own access tokens as well as a
-        /// session token.
+        /// session token, and only those (`r[auth.jwt.first-party-access]`):
+        /// `whoami`, `list_organizations`, `create_organization`,
+        /// `list_members`, `create_invitation`, `create_invite_link`,
+        /// `remove_member`, `accept_invitation`, `claim_invitation` and
+        /// `redeem_invite_link`. Each still holds the account to its own
+        /// check (its role, the invitation's token or address). The shared
+        /// [`Self::require_member`] and [`Self::authorize_member_action`]
+        /// take a session alone, so every other organization call does.
         ///
         /// Two kinds of caller reach it. The issuer's own pages, the
         /// desktop clients and an org's node relaying a person's bearer
@@ -17042,22 +17493,34 @@ pub mod organizations {
                 .ok_or(AuthFlowError::InvalidCredentials)
         }
 
+        /// The session's membership in an org. A session token only: the
+        /// calls that also take a first-party access token resolve their
+        /// caller with [`Self::organization_caller`] and ask
+        /// [`Self::member_of`] instead.
         async fn require_member(
             &self,
             session_token: &str,
             organization_id: uuid::Uuid,
         ) -> Result<AuthMember, AuthFlowError> {
-            let session = self
-                .current_session(CurrentSession {
-                    token: session_token.to_owned(),
-                })
-                .await?;
+            let user = self.session_caller(session_token).await?;
+            self.member_of(user.id, organization_id).await
+        }
+
+        /// An account's membership in an org, however the caller was
+        /// established.
+        async fn member_of(
+            &self,
+            user_id: uuid::Uuid,
+            organization_id: uuid::Uuid,
+        ) -> Result<AuthMember, AuthFlowError> {
             self.storage
-                .find_member(organization_id, session.user.id)
+                .find_member(organization_id, user_id)
                 .await?
                 .ok_or(AuthFlowError::PermissionDenied)
         }
 
+        /// The session may do `action` on `resource` in the org. A
+        /// session token only (see [`Self::require_member`]).
         async fn authorize_member_action(
             &self,
             session_token: &str,
@@ -17065,7 +17528,21 @@ pub mod organizations {
             resource: &str,
             action: &str,
         ) -> Result<AuthMember, AuthFlowError> {
-            let member = self.require_member(session_token, organization_id).await?;
+            let user = self.session_caller(session_token).await?;
+            self.authorize_user_action(user.id, organization_id, resource, action)
+                .await
+        }
+
+        /// The account may do `action` on `resource` in the org: its
+        /// role grants it, by default or by the org's own roles.
+        async fn authorize_user_action(
+            &self,
+            user_id: uuid::Uuid,
+            organization_id: uuid::Uuid,
+            resource: &str,
+            action: &str,
+        ) -> Result<AuthMember, AuthFlowError> {
+            let member = self.member_of(user_id, organization_id).await?;
             for role in member
                 .role
                 .split(',')

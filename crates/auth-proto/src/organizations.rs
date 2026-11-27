@@ -15,7 +15,10 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use crate::{AuthAgentLink, AuthFlowError, AuthInvitation, AuthMember, AuthOrganization, AuthUser};
+use crate::{
+    AuthAgentLink, AuthFlowError, AuthInvitation, AuthInviteLink, AuthMember, AuthOrganization,
+    AuthUser,
+};
 
 /// A linked agent as the owner sees it: the link, and who it names.
 ///
@@ -68,6 +71,31 @@ pub struct OrganizationMember {
 pub struct IssuedInvitation {
     pub invitation: AuthInvitation,
     pub token: String,
+}
+
+/// A freshly minted invite link and the token that redeems it.
+///
+/// Like [`IssuedInvitation`], the token is returned once and only its
+/// hash is kept: the issuer's join page is `/join?token=<token>`.
+#[derive(facet::Facet, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "fake", derive(fake::Dummy))]
+#[derive(Eq)]
+pub struct IssuedInviteLink {
+    pub link: AuthInviteLink,
+    pub token: String,
+}
+
+/// A link to mint: the org it admits into, the role it grants, and how
+/// long and how often it works (`None`: no limit).
+#[derive(facet::Facet, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "fake", derive(fake::Dummy))]
+#[derive(Eq)]
+pub struct NewInviteLink {
+    pub organization_id: Uuid,
+    pub role: String,
+    pub label: Option<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub max_uses: Option<i32>,
 }
 
 /// What a new organization is called. The caller becomes its owner.
@@ -129,7 +157,8 @@ pub trait OrganizationService {
         organization_id: Uuid,
     ) -> Result<OrganizationBundle, AuthFlowError>;
 
-    /// Who is in an org — people, not ids.
+    /// Who is in an org — people, not ids. Any member may read it. The
+    /// token may be a session or a first-party app's access token.
     #[http(path = "organization/members")]
     async fn list_members(
         &self,
@@ -138,8 +167,9 @@ pub trait OrganizationService {
     ) -> Result<Vec<OrganizationMember>, AuthFlowError>;
 
     /// Create an org; the caller becomes its owner. The token may be a
-    /// session or a first-party app's access token: creating changes no
-    /// org that exists (every other write here takes a session).
+    /// session or a first-party app's access token (as at the members,
+    /// invitation, invite-link and remove-member calls; every other write
+    /// here takes a session).
     #[http(path = "organization/create")]
     async fn create_organization(
         &self,
@@ -155,7 +185,8 @@ pub trait OrganizationService {
         organization_id: Uuid,
     ) -> Result<(), AuthFlowError>;
 
-    /// Issue an invitation. The returned token is shown once.
+    /// Issue an invitation. The returned token is shown once. Needs
+    /// `invitation:create`; a session or a first-party app's access token.
     #[http(path = "organization/invite-member")]
     async fn invite_member(
         &self,
@@ -164,6 +195,7 @@ pub trait OrganizationService {
     ) -> Result<IssuedInvitation, AuthFlowError>;
 
     /// Redeem an invitation as the signed-in caller, whoever was invited.
+    /// A session or a first-party app's access token.
     #[http(path = "organization/accept-invitation")]
     async fn accept_invitation(
         &self,
@@ -190,7 +222,8 @@ pub trait OrganizationService {
         role: String,
     ) -> Result<AuthMember, AuthFlowError>;
 
-    /// Remove somebody else. Needs `member:delete`.
+    /// Remove somebody else. Needs `member:delete`; a session or a
+    /// first-party app's access token.
     #[http(path = "organization/remove-member")]
     async fn remove_member(
         &self,
@@ -251,7 +284,8 @@ pub trait OrganizationService {
     ///
     /// This proves it by address instead, which is strictly stronger:
     /// the token path never checks who the invitation names, so anyone
-    /// with the link can take it. Here only the named person can.
+    /// with the link can take it. Here only the named person can. A
+    /// session or a first-party app's access token.
     #[http(path = "organization/claim-invitation")]
     async fn claim_invitation(
         &self,
@@ -281,4 +315,24 @@ pub trait OrganizationService {
     /// The agents the caller has linked, with who they are.
     #[http(path = "organization/agents")]
     async fn list_agents(&self, token: String) -> Result<Vec<LinkedAgent>, AuthFlowError>;
+
+    /// Mint a link that admits whoever follows it, as `link.role`. Needs
+    /// `invitation:create` (a link is an invitation with the address
+    /// left blank); a session or a first-party app's access token.
+    #[http(path = "organization/invite-link")]
+    async fn create_invite_link(
+        &self,
+        token: String,
+        link: NewInviteLink,
+    ) -> Result<IssuedInviteLink, AuthFlowError>;
+
+    /// Join the org an invite link admits into, as the caller. Following
+    /// a link into an org you are already in answers that membership. A
+    /// session or a first-party app's access token.
+    #[http(path = "organization/join")]
+    async fn join_by_link(
+        &self,
+        token: String,
+        link_token: String,
+    ) -> Result<AuthMember, AuthFlowError>;
 }
