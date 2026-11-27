@@ -35,7 +35,9 @@ fallback keys by key id.
 
 r[auth.jwt.first-party-access]
 The issuer MUST accept its own OIDC access token in place of a session token
-at `whoami` and `list_organizations` only, and only when it verifies with
+at `whoami`, `list_organizations` and `create_organization` only (creating
+an organization changes none that exists; every other organization write
+MUST take a session token), and only when it verifies with
 the default audience, names an enabled client registered `first_party`
 (`skip_consent` alone MUST NOT be enough: it is a consent convenience),
 carries the `openid` scope, is an access token (`token_use: "access"`, which

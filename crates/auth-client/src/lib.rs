@@ -52,6 +52,7 @@
 
 pub mod device;
 pub mod oidc;
+pub mod orgs;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod this_device;
 

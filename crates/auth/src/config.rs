@@ -102,9 +102,10 @@ pub struct OidcClientConfig {
     /// (see [`Self::first_party`]).
     pub skip_consent: bool,
     /// The issuer's own app (the Architect web app): its OIDC access
-    /// tokens are taken in place of a session at `whoami` and
-    /// `list_organizations`, and nowhere else. Default `false`; set it
-    /// only on a client the issuer's operator ships.
+    /// tokens are taken in place of a session at `whoami`,
+    /// `list_organizations` and `create_organization`, and nowhere else.
+    /// Default `false`; set it only on a client the issuer's operator
+    /// ships.
     pub first_party: bool,
     /// Its refresh tokens are single use (RFC 9700 4.14.2): each refresh
     /// answers the next one, the old one presented again within a few
